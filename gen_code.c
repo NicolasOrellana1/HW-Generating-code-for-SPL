@@ -5,7 +5,7 @@
 // Initialize the code generator
 void gen_code_initialize()
 {
-    // nothing to do!
+    literal_table_initialize()
 }
 
 code_seq gen_code_program(AST *prog)
