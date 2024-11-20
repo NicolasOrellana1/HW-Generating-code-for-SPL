@@ -1,3 +1,7 @@
+//
+// Created by Matt on 11/13/2024.
+//
+
 #include <assert.h>
 #include <stdlib.h>
 #include <string.h>
@@ -5,171 +9,198 @@
 #include "utilities.h"
 #include "machine_types.h"
 
-// Literal table entry definition
-typedef struct literal_table_entry_s {
-    struct literal_table_entry_s *next;
-    const char *text;
-    word_type value;
-    unsigned int offset;
-} literal_table_entry_t;
+// Constant table entries
 
-// Stack entry definition
-typedef struct stack_entry_s {
-    word_type value;
-    struct stack_entry_s *next;
-} stack_entry_t;
+static literal_table_entry_t *first = NULL;
+static literal_table_entry_t *last = NULL;
+static unsigned int next_word_offset = 0;
 
-// Stack definition
-typedef struct stack_s {
-    stack_entry_t *top;
-    unsigned int size;
-    unsigned int capacity;
-} stack_t;
+// Iteration state follows
+static bool iterating = false;
+static literal_table_entry_t *iteration_next = NULL;
+// The table of constants is a linked list of literal_table_entry_t's
+// with 'first' pointing to the first entry and 'last' to the last one
 
-// Word register definition
-typedef struct word_registers_s {
-    word_type *registers;
-    unsigned int size;
-} word_registers_t;
 
-// Static variables for literal table
-static literal_table_entry_t *first;
-static literal_table_entry_t *last;
-static unsigned int next_word_offset;
-
-// Static variables for stack
-static stack_t stack;
-
-// Static variables for word registers
-static word_registers_t registers;
-
-// Literal table utility functions
+// Check the invariant
 static void literal_table_okay()
 {
-    bool emp = (next_word_offset == 0);
+    bool emp = literal_table_empty();
+    assert(emp == (next_word_offset == 0));
     assert(emp == (first == NULL));
     assert(emp == (last == NULL));
 }
 
-// Stack utility functions
-void stack_initialize(stack_t *stack, unsigned int capacity)
+// Return true if the literal table is empty
+bool literal_table_empty()
 {
-    stack->top = NULL;
-    stack->size = 0;
-    stack->capacity = capacity;
+    return next_word_offset == 0;
 }
 
-bool stack_empty(const stack_t *stack)
+// Return the size (in words/entries) in the literal table
+unsigned int literal_table_size()
 {
-    return stack->size == 0;
+    return next_word_offset;
 }
 
-bool stack_full(const stack_t *stack)
+// Is the literal_table full?
+bool literal_table_full()
 {
-    return stack->size >= stack->capacity;
+    return false;
 }
+bool initalized = false;
 
-void stack_push(stack_t *stack, word_type value)
-{
-    assert(!stack_full(stack));
-    stack_entry_t *new_entry = (stack_entry_t *)malloc(sizeof(stack_entry_t));
-    if (!new_entry) {
-        bail_with_error("No space to allocate new stack entry!");
-    }
-    new_entry->value = value;
-    new_entry->next = stack->top;
-    stack->top = new_entry;
-    stack->size++;
-}
-
-word_type stack_pop(stack_t *stack)
-{
-    assert(!stack_empty(stack));
-    stack_entry_t *top_entry = stack->top;
-    word_type value = top_entry->value;
-    stack->top = top_entry->next;
-    free(top_entry);
-    stack->size--;
-    return value;
-}
-
-// Register utility functions
-void registers_initialize(word_registers_t *reg, unsigned int size)
-{
-    reg->registers = (word_type *)malloc(size * sizeof(word_type));
-    if (!reg->registers) {
-        bail_with_error("No space to allocate word registers!");
-    }
-    reg->size = size;
-    for (unsigned int i = 0; i < size; i++) {
-        reg->registers[i] = 0;
-    }
-}
-
-word_type registers_read(const word_registers_t *reg, unsigned int index)
-{
-    assert(index < reg->size);
-    return reg->registers[index];
-}
-
-void registers_write(word_registers_t *reg, unsigned int index, word_type value)
-{
-    assert(index < reg->size);
-    reg->registers[index] = value;
-}
-
-// Literal table initialization
+// Initialize the literal_table
 void literal_table_initialize()
 {
+    initalized=true;
+    // Free any existing entries
+    literal_table_entry_t *entry = first;
+    while (entry != NULL) {
+        literal_table_entry_t *next = entry->next;
+        // If using strdup, uncomment the next line
+        // free((char *)entry->text);
+        free(entry);
+        entry = next;
+    }
+
     first = NULL;
     last = NULL;
     next_word_offset = 0;
+    iterating = false;
+    iteration_next = NULL;
     literal_table_okay();
-    stack_initialize(&stack, 1024); // Example stack capacity
-    registers_initialize(&registers, 16); // Example register size
 }
 
-// Lookup and add in literal table
-unsigned int literal_table_lookup(const char *val_string, word_type value)
+// Return the offset of 'sought' if it is in the table; otherwise return -1.
+int literal_table_find_offset(const char *sought, word_type value)
 {
     literal_table_okay();
     literal_table_entry_t *entry = first;
     while (entry != NULL) {
-        if (strcmp(entry->text, val_string) == 0) {
+        if (strcmp(entry->text, sought) == 0) {
             return entry->offset;
         }
         entry = entry->next;
     }
+    return -1;
+}
 
-    // Add new entry
+// Return true if 'sought' is in the table
+bool literal_table_present(const char *sought, word_type value)
+{
+    literal_table_okay();
+    return literal_table_find_offset(sought, value) >= 0;
+}
+
+// Return the word offset for val_string/value, entering it in the table if it's not already present
+unsigned int literal_table_lookup(const char *val_string, word_type value)
+{
+    if (!initalized) {
+        literal_table_initialize();
+
+    }
+    int ret = literal_table_find_offset(val_string, value);
+    if (ret >= 0) {
+        return ret;  // Value already exists
+    }
+
+    // Allocate a new entry
     literal_table_entry_t *new_entry = (literal_table_entry_t *)malloc(sizeof(literal_table_entry_t));
     if (!new_entry) {
-        bail_with_error("No space to allocate new literal table entry!");
+        bail_with_error("Failed to allocate memory for literal table entry.");
     }
+
+    // Assign the string directly
     new_entry->text = val_string;
     new_entry->value = value;
-    new_entry->next = NULL;
     new_entry->offset = next_word_offset++;
+    new_entry->next = NULL;
 
-    if (!first) {
-        first = new_entry;
-        last = new_entry;
-    } else {
+    // Add to the table
+    if (last) {
         last->next = new_entry;
-        last = new_entry;
+    } else {
+        first = new_entry;
     }
+    last = new_entry;
+
+    literal_table_okay();
     return new_entry->offset;
 }
 
-// Stack and registers interaction in literal table
-void literal_table_push_to_stack(const char *val_string)
+// === Iteration helpers ===
+
+// Start an iteration over the literal table
+void literal_table_start_iteration()
 {
-    int offset = literal_table_lookup(val_string, 0); // Assuming a default value of 0
-    stack_push(&stack, offset);
+    if (iterating) {
+        bail_with_error("Attempt to start literal_table iterating when already iterating!");
+    }
+    literal_table_okay();
+    iterating = true;
+    iteration_next = first;
 }
 
-void literal_table_write_to_register(unsigned int index, const char *val_string)
+// Is there another literal in the literal table?
+bool literal_table_iteration_has_next()
 {
-    int offset = literal_table_lookup(val_string, 0); // Assuming a default value of 0
-    registers_write(&registers, index, offset);
+    literal_table_okay();
+    bool ret = (iteration_next != NULL);
+    if (!ret) {
+        iterating = false;
+    }
+    return ret;
+}
+
+// Return the next literal value in the literal table and advance the iteration
+word_type literal_table_iteration_next()
+{
+    assert(iteration_next != NULL);
+
+    word_type ret = iteration_next->value;
+    iteration_next = iteration_next->next;
+    return ret;
+}
+
+// End the current iteration over the literal table.
+void literal_table_end_iteration()
+{
+    iterating = false;
+}
+
+// Function to print the current state of the literal table for debugging
+void literal_table_debug_print()
+{
+    printf("Debug: Literal Table State:\n");
+    literal_table_entry_t *entry = first;
+    while (entry != NULL) {
+        printf("Offset: %u, Text: %s, Value: %d\n", entry->offset, entry->text, entry->value);
+        entry = entry->next;
+    }
+}
+
+// Test function
+void literal_table_test()
+{
+    literal_table_initialize();
+
+    // Adding literals
+    literal_table_lookup("CONST_ONE", 1);
+    literal_table_lookup("CONST_TWO", 20);
+    literal_table_lookup("CONST_THREE", 3);
+
+    // Printing the table for debugging
+    literal_table_debug_print();
+
+    // Iterating over literals
+    literal_table_start_iteration();
+    while (literal_table_iteration_has_next()) {
+        word_type value = literal_table_iteration_next();
+        printf("Literal value: %u\n", value);
+    }
+    literal_table_end_iteration();
+
+    // Clean up
+    literal_table_initialize();  // Frees the table
 }
