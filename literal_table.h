@@ -3,10 +3,16 @@
 #define _LITERAL_TABLE_H
 #include <stdbool.h>
 #include "machine_types.h"
-
+typedef struct literal_table_entry_s {
+    struct literal_table_entry_s *next;
+    const char *text;  // Changed to 'const char *' to match the professor's code
+    word_type value;
+    unsigned int offset;
+} literal_table_entry_t;
 // Return the size (in words/entries) in the literal table
 extern unsigned int literal_table_size();
 
+extern void literal_table_debug_print();
 // is the literal_table empty?
 extern bool literal_table_empty();
 
@@ -28,6 +34,7 @@ extern bool literal_table_present(const char *sought, word_type value);
 extern unsigned int literal_table_lookup(const char *val_string,
                      word_type value);
 
+extern void literal_table_test();
 // === iteration helpers ===
 
 // Start an iteration over the literal table
