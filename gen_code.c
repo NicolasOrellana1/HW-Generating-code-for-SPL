@@ -1,267 +1,224 @@
-/* $Id: gen_code.c,v 1.10 2023/03/30 21:28:07 leavens Exp $ */
-#include "utilities.h"
+#include <stdio.h>
+#include <stdlib.h>
+#include <assert.h>
 #include "gen_code.h"
+#include "literal_table.h"
+#include "code_seq.h"
+#include "code.h"
+#include "bof.h"
+#include "ast.h"
+#include "utilities.h"
 
-// Initialize the code generator
-void gen_code_initialize()
-{
-    literal_table_initialize()
+#define STACK_SPACE 4096
+
+// === Initialization ===
+void gen_code_initialize() {
+    literal_table_initialize();
 }
 
-code_seq gen_code_program(AST *prog)
-{
-    /* design:
-       [code to make space for the static link, INC 1]
-       [code to allocate space for all the vars declared.]
-       [code for the statement]
-       HLT
-     */
-    code_seq ret = code_seq_singleton(code_inc(BLOCK_LINKS_SIZE));
-    ret = code_seq_concat(ret, gen_code_varDecls(prog->data.program.vds));
-    ret = code_seq_concat(ret, gen_code_stmt(prog->data.program.stmt));
-    ret = code_seq_add_to_end(ret, code_hlt());
-    return ret;
+// === Program-Level Code Generation ===
+void gen_code_program(BOFFILE bf, program_t *prog) {
+    code_seq main_code = gen_code_block(prog->main_block);
+
+    // Add exit instruction at the end
+    main_code = code_seq_add_to_end(main_code, code_exit());
+
+    // Generate and write BOF file
+    BOFHeader header = {
+        .magic = "BO32",
+        .text_start_address = 0,
+        .text_length = code_seq_size(main_code),
+        .data_start_address = code_seq_size(main_code),
+        .data_length = literal_table_size() * BYTES_PER_WORD,
+        .stack_bottom_addr = code_seq_size(main_code) + literal_table_size() + STACK_SPACE
+    };
+    bof_write_header(bf, &header);
+    gen_code_output_seq(bf, main_code);
+    gen_code_output_literals(bf);
+    bof_close(bf);
 }
 
-// generate code for the declarations in vds
-code_seq gen_code_varDecls(AST_list vds)
-{
-    code_seq ret = code_seq_empty();
-    while (!ast_list_is_empty(vds)) {
-	ret = code_seq_concat(ret,
-			      gen_code_varDecl(ast_list_first(vds)));
-	vds = ast_list_rest(vds);
-    }
-    return ret;
-}
-
-// generate code for the var declaration vd
-code_seq gen_code_varDecl(AST *vd)
-{
-    return code_seq_singleton(code_inc(1));
-}
-
-// generate code for the statement
-code_seq gen_code_stmt(AST *stmt)
-{
-    switch (stmt->type_tag) {
-    case assign_ast:
-	return gen_code_assignStmt(stmt);
-	break;
-    case begin_ast:
-	return gen_code_beginStmt(stmt);
-	break;
-    case if_ast:
-	return gen_code_ifStmt(stmt);
-	break;
-    case read_ast:
-	return gen_code_readStmt(stmt);
-	break;
-    case write_ast:
-	return gen_code_writeStmt(stmt);
-	break;
-    default:
-	bail_with_error("Bad AST passed to gen_code_stmt!");
-	// The following should never execute
-	return code_seq_empty();
+// Output the code sequence to the BOFFILE
+static void gen_code_output_seq(BOFFILE bf, code_seq cs) {
+    while (!code_seq_is_empty(cs)) {
+        bof_write_word(bf, code_seq_first(cs));
+        cs = code_seq_rest(cs);
     }
 }
 
-// generate code for the statement
-code_seq gen_code_assignStmt(AST *stmt)
-{
-    /* design of code seq:
-       [get fp for the variable on top of stack]
-       [get value of expression on top of stack]
-       STO([offset for the variable])
-     */
-    unsigned int outLevels
-	= stmt->data.assign_stmt.ident->data.ident.idu->levelsOutward;
-    code_seq ret = code_compute_fp(outLevels);
-    ret = code_seq_concat(ret,
-			  gen_code_expr(stmt->data.assign_stmt.exp));
-    unsigned int ofst
-	= stmt->data.assign_stmt.ident->data.ident.idu->attrs->loc_offset;
-    ret = code_seq_add_to_end(ret, code_sto(ofst));
-    return ret;
-}
-
-// generate code for the statement
-code_seq gen_code_beginStmt(AST *stmt)
-{
-    /* design of code_seq
-        [save old BP on stack, PBP]
-	[adjust the BP]
-        [allocate variables declared]
-	[concatenated code for each stmt]
-	[if there are variables, pop them off the stack]
-        [RBP]
-     */
-    // save the static link (surronging scope's BP) on stack
-    code_seq ret = code_seq_singleton(code_pbp());
-    // set the BP to SP-1
-    ret = code_seq_add_to_end(ret, code_psp());
-    ret = code_seq_add_to_end(ret, code_lit(1));
-    ret = code_seq_add_to_end(ret, code_sub());
-    ret = code_seq_add_to_end(ret, code_rbp());
-    // allocate any declared variables
-    AST_list vds = stmt->data.begin_stmt.vds;
-    int num_vds = ast_list_size(vds);
-    ret = code_seq_concat(ret, gen_code_varDecls(vds));
-    // add code for all the statements
-    AST_list stmts = stmt->data.begin_stmt.stmts;
-    while (!ast_list_is_empty(stmts)) {
-	ret = code_seq_concat(ret, gen_code_stmt(ast_list_first(stmts)));
-	stmts = ast_list_rest(stmts);
+// Output literals stored in the literal table
+static void gen_code_output_literals(BOFFILE bf) {
+    literal_table_start_iteration();
+    while (literal_table_iteration_has_next()) {
+        bof_write_word(bf, literal_table_iteration_next());
     }
-    if (num_vds > 0) {
-	// if there are variables, trim the variables
-	ret = code_seq_add_to_end(ret, code_inc(- num_vds));
+    literal_table_end_iteration();
+}
+
+// === Block Handling ===
+static code_seq gen_code_block(block_t *block) {
+    code_seq block_code = code_seq_empty();
+
+    // Allocate space for local variables
+    if (block->local_var_count > 0) {
+        block_code = code_seq_add_to_end(block_code, code_addi(SP, SP, -block->local_var_count));
     }
-    // restore the old BP
-    ret = code_seq_add_to_end(ret, code_rbp());
-    return ret;
+
+    // Generate code for each statement in the block
+    stmt_t *stmt = block->statements;
+    while (stmt) {
+        block_code = code_seq_concat(block_code, gen_code_stmt(stmt));
+        stmt = stmt->next;
+    }
+
+    // Deallocate local variables
+    if (block->local_var_count > 0) {
+        block_code = code_seq_add_to_end(block_code, code_addi(SP, SP, block->local_var_count));
+    }
+
+    return block_code;
 }
 
-// generate code for the statement
-code_seq gen_code_ifStmt(AST *stmt)
-{
-    /* design:
-        [code for pushing the condition on top of stack]
-	JPC 2
-        JMP [around the body]
-        [code for the body]
-     */
-    code_seq condc = gen_code_expr(stmt->data.if_stmt.exp);
-    code_seq bodyc = gen_code_stmt(stmt->data.if_stmt.stmt);
-    code_seq ret = code_seq_add_to_end(condc, code_jpc(2));
-    ret = code_seq_add_to_end(ret, code_jmp(code_seq_size(bodyc)+1));
-    ret = code_seq_concat(ret, bodyc);
-    return ret;
-}
-
-// generate code for the statement
-code_seq gen_code_readStmt(AST *stmt)
-{
-    /* design:
-       [code to put the fp for the variable on top of stack]
-       CHI
-       STO [(variable offset)]
-     */
-    id_use *idu = stmt->data.read_stmt.ident->data.ident.idu;
-    code_seq ret = code_compute_fp(idu->levelsOutward);
-    ret = code_seq_add_to_end(ret, code_chi());
-    ret = code_seq_add_to_end(ret, code_sto(idu->attrs->loc_offset));
-    return ret;
-}
-
-// generate code for the statement
-code_seq gen_code_writeStmt(AST *stmt)
-{
-    /* design:
-       [code to put the exp's value on top of stack
-       CHO
-     */
-    code_seq ret = gen_code_expr(stmt->data.write_stmt.exp);
-    return code_seq_add_to_end(ret, code_cho());
-}
-
-// generate code for the expresion
-code_seq gen_code_expr(AST *exp)
-{
-    switch (exp->type_tag) {
-    case number_ast:
-	return gen_code_number_expr(exp);
-	break;
-    case ident_ast:
-	return gen_code_ident_expr(exp);
-	break;
-    case bin_expr_ast:
-	return gen_code_bin_expr(exp);
-	break;
-    case not_expr_ast:
-	return gen_code_not_expr(exp);
-	break;
-    default:
-	bail_with_error("gen_code_expr passed bad AST!");
-	// The following should never execute
-	return code_seq_empty();
-	break;
+// === Statement Handling ===
+static code_seq gen_code_stmt(stmt_t *stmt) {
+    switch (stmt->kind) {
+        case ASSIGN_STMT:
+            return gen_code_assign_stmt(stmt->assign_stmt);
+        case PRINT_STMT:
+            return gen_code_print_stmt(stmt->print_stmt);
+        case IF_STMT:
+            return gen_code_if_stmt(stmt->if_stmt);
+        case WHILE_STMT:
+            return gen_code_while_stmt(stmt->while_stmt);
+        case READ_STMT:
+            return gen_code_read_stmt(stmt->read_stmt);
+        case CALL_STMT:
+            return gen_code_call_stmt(stmt->call_stmt);
+        case BLOCK_STMT:
+            return gen_code_block(stmt->block_stmt);
+        default:
+            fprintf(stderr, "Unknown statement kind.\n");
+            exit(EXIT_FAILURE);
     }
 }
 
-// generate code for the expression (exp)
-code_seq gen_code_bin_expr(AST *exp)
-{
-    /* design:
-        [code to push left exp's value on top of stack]
-	[code to push right exp's value on top of stack]
-	[instruction that implements the operation op]
-    */
-    code_seq ret = gen_code_expr(exp->data.bin_expr.leftexp);
-    ret = code_seq_concat(ret, gen_code_expr(exp->data.bin_expr.rightexp));
-    switch (exp->data.bin_expr.op) {
-    case eqeqop:
-	return code_seq_add_to_end(ret, code_eql());
-	break;
-    case neqop:
-	return code_seq_add_to_end(ret, code_neq());
-	break;
-    case ltop:
-	return code_seq_add_to_end(ret, code_lss());
-	break;
-    case leqop:
-	return code_seq_add_to_end(ret, code_leq());
-	break;
-    case plusop:
-	return code_seq_add_to_end(ret, code_add());
-	break;
-    case minusop:
-	return code_seq_add_to_end(ret, code_sub());
-	break;
-    case multop:
-	return code_seq_add_to_end(ret, code_mul());
-	break;
-    case divop:
-	return code_seq_add_to_end(ret, code_div());
-	break;
-    default:
-	bail_with_error("gen_code_bin_expr passed AST with bad op!");
-	// The following should never execute
-	return code_seq_empty();
+// Assignment statement: x := expr
+static code_seq gen_code_assign_stmt(assign_stmt_t assign) {
+    code_seq expr_code = gen_code_expr(assign.expr);
+    return code_seq_add_to_end(expr_code, code_store(assign.var.offset));
+}
+
+// Print statement: print expr
+static code_seq gen_code_print_stmt(print_stmt_t print) {
+    code_seq expr_code = gen_code_expr(print.expr);
+    return code_seq_concat(expr_code, code_seq_singleton(code_pint()));
+}
+
+// If-Else statement
+static code_seq gen_code_if_stmt(if_stmt_t if_stmt) {
+    code_seq cond_code = gen_code_expr(if_stmt.cond);
+    code_seq then_code = gen_code_block(if_stmt.then_branch);
+    code_seq else_code = if_stmt.else_branch ? gen_code_block(if_stmt.else_branch) : code_seq_empty();
+
+    unsigned int skip_then = code_seq_size(then_code) + 1;
+    unsigned int skip_else = code_seq_size(else_code);
+
+    code_seq if_code = cond_code;
+    if_code = code_seq_add_to_end(if_code, code_branch_on_false(skip_then));
+    if_code = code_seq_concat(if_code, then_code);
+
+    if (!code_seq_is_empty(else_code)) {
+        if_code = code_seq_add_to_end(if_code, code_jump(skip_else));
+        if_code = code_seq_concat(if_code, else_code);
+    }
+
+    return if_code;
+}
+
+// While statement
+static code_seq gen_code_while_stmt(while_stmt_t while_stmt) {
+    code_seq cond_code = gen_code_expr(while_stmt.cond);
+    code_seq body_code = gen_code_block(while_stmt.body);
+
+    unsigned int body_len = code_seq_size(body_code) + 1;
+
+    code_seq loop_code = cond_code;
+    loop_code = code_seq_add_to_end(loop_code, code_branch_on_false(body_len));
+    loop_code = code_seq_concat(loop_code, body_code);
+
+    unsigned int jump_back = -(code_seq_size(loop_code) + 1);
+    return code_seq_add_to_end(loop_code, code_jump(jump_back));
+}
+
+// Read statement: read x
+static code_seq gen_code_read_stmt(read_stmt_t read_stmt) {
+    return code_seq_singleton(code_read(read_stmt.var.offset));
+}
+
+// Procedure call: call proc
+static code_seq gen_code_call_stmt(call_stmt_t call_stmt) {
+    return code_seq_singleton(code_call(call_stmt.proc.offset));
+}
+
+// === Expression Handling ===
+static code_seq gen_code_expr(expr_t expr) {
+    switch (expr.kind) {
+        case CONST_EXPR:
+            return gen_code_literal(expr.literal);
+        case VAR_EXPR:
+            return code_seq_singleton(code_load(expr.var.offset));
+        case BIN_OP_EXPR:
+            return gen_code_bin_op(expr.bin_op);
+        case UNARY_OP_EXPR:
+            return gen_code_unary_op(expr.unary_op);
+        default:
+            fprintf(stderr, "Unknown expression kind.\n");
+            exit(EXIT_FAILURE);
     }
 }
 
-// generate code for the logical not expression (!)
-code_seq gen_code_not_expr(AST *exp)
-{
-    /* design:
-       LIT 1
-       [code to put subexpression's value on top of stack]
-       SUB
-       RND
-     */
-    code_seq ret = code_seq_singleton(code_lit(1));
-    ret = code_seq_concat(ret, gen_code_expr(exp->data.not_expr.exp));
-    ret = code_seq_add_to_end(ret, code_sub());
-    return code_seq_add_to_end(ret, code_rnd());
+// Generate code for a binary operation
+static code_seq gen_code_bin_op(bin_op_expr_t bin_op) {
+    code_seq left_code = gen_code_expr(bin_op.left);
+    code_seq right_code = gen_code_expr(bin_op.right);
+    code_seq op_code = code_seq_empty();
+
+    switch (bin_op.op) {
+        case ADD_OP:
+            op_code = code_seq_singleton(code_add());
+            break;
+        case SUB_OP:
+            op_code = code_seq_singleton(code_sub());
+            break;
+        case MUL_OP:
+            op_code = code_seq_singleton(code_mul());
+            break;
+        case DIV_OP:
+            op_code = code_seq_singleton(code_div());
+            break;
+        case MOD_OP:
+            op_code = code_seq_singleton(code_mod());
+            break;
+        default:
+            bail_with_error("Unsupported binary operator.");
+    }
+
+    return code_seq_concat(code_seq_concat(left_code, right_code), op_code);
 }
 
-// generate code for the ident expression (ident)
-code_seq gen_code_ident_expr(AST *ident)
-{
-    /* design:
-       [code to load fp for the variable]
-       LOD [offset for the variable]
-     */
-    id_use *idu = ident->data.ident.idu;
-    lexical_address *la = lexical_address_create(idu->levelsOutward,
-						 idu->attrs->loc_offset);
-    return code_load_from_lexical_address(la);
+// Generate code for a unary operation
+static code_seq gen_code_unary_op(unary_op_expr_t unary_op) {
+    code_seq expr_code = gen_code_expr(unary_op.expr);
+
+    if (unary_op.op == NEG_OP) {
+        return code_seq_concat(expr_code, code_seq_singleton(code_neg()));
+    }
+
+    return expr_code;
 }
 
-// generate code for the number expression (num)
-code_seq gen_code_number_expr(AST *num)
-{
-    return code_seq_singleton(code_lit(word2float(num->data.number.value)));
+// Generate code for a literal
+static code_seq gen_code_literal(literal_t literal) {
+    unsigned int offset = literal_table_lookup(literal.value);
+    return code_seq_singleton(code_load_global(offset));
 }

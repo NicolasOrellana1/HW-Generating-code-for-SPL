@@ -3,52 +3,33 @@
 #define _LITERAL_TABLE_H
 #include <stdbool.h>
 #include "machine_types.h"
-typedef struct literal_table_entry_s {
-    struct literal_table_entry_s *next;
-    const char *text;  // Changed to 'const char *' to match the professor's code
-    word_type value;
-    unsigned int offset;
-} literal_table_entry_t;
-// Return the size (in words/entries) in the literal table
-extern unsigned int literal_table_size();
 
-extern void literal_table_debug_print();
-// is the literal_table empty?
-extern bool literal_table_empty();
+// Initializes the literal table, freeing any existing entries.
+void literal_table_initialize();
 
-// is the literal_table full?
-extern bool literal_table_full();
+// Returns true if the literal table is empty.
+bool literal_table_empty();
 
-// initialize the literal_table
-extern void literal_table_initialize();
+// Returns the size of the literal table (number of entries).
+unsigned int literal_table_size();
 
-// Return the offset of sought if it is in the table,
-// otherwise return -1.
-extern int literal_table_find_offset(const char *sought, word_type value);
+// Adds a literal value to the table or retrieves its existing offset.
+// Returns the offset of the literal.
+unsigned int literal_table_lookup(int value);
 
-// Return true just when sought is in the table
-extern bool literal_table_present(const char *sought, word_type value);
+// Starts an iteration over the literal table.
+void literal_table_start_iteration();
 
-// Return the word offset for val_string/value
-// entering it in the table if it's not already present
-extern unsigned int literal_table_lookup(const char *val_string,
-                     word_type value);
+// Checks if there are more literals in the current iteration.
+bool literal_table_iteration_has_next();
 
-extern void literal_table_test();
-// === iteration helpers ===
+// Returns the next literal during iteration.
+int literal_table_iteration_next();
 
-// Start an iteration over the literal table
-// which can extract the elements
-extern void literal_table_start_iteration();
+// Ends the current iteration.
+void literal_table_end_iteration();
 
-// End the current iteration over the literal table.
-extern void literal_table_end_iteration();
+// Prints the state of the literal table for debugging.
+void literal_table_debug_print();
 
-// Is there another float in the literal table?
-extern bool literal_table_iteration_has_next();
-
-// Return the next word_type in the literal table
-// and advance the iteration
-extern word_type literal_table_iteration_next();
-
-#endif
+#endif // LITERAL_TABLE_H
